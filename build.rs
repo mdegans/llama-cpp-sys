@@ -6,7 +6,8 @@ fn main() {
     // Configure
     let mut config = Config::new("external/llama.cpp");
     config
-        .build_target("preinstall")
+        .build_target("install")
+        .generator("Ninja")
         .define("LLAMA_STATIC", "ON")
         .define("LLAMA_STANDALONE", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
