@@ -8,54 +8,67 @@ fn main() {
     config
         .build_target("install")
         .generator("Ninja")
-        .define("LLAMA_STATIC", "ON")
-        .define("LLAMA_STANDALONE", "OFF")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("LLAMA_BUILD_COMMON", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
-        .define("LLAMA_BUILD_TESTS", "OFF");
+        .define("LLAMA_BUILD_TESTS", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "OFF");
 
     #[cfg(target_os = "macos")]
     {
         config
-            .define("LLAMA_METAL", "ON")
-            .define("LLAMA_ACCELERATE", "true")
-            .define("LLAMA_METAL_EMBED_LIBRARY", "ON");
+            .define("GGML_METAL", "ON")
+            .define("GGML_ACCELERATE", "ON")
+            .define("GGML_METAL_EMBED_LIBRARY", "ON");
     }
 
     #[cfg(feature = "cuda")]
-    config.define("LLAMA_CUDA", "ON");
+    config.define("GGML_CUDA", "ON");
 
     #[cfg(feature = "cuda_f16")]
-    config.define("LLAMA_CUDA_FP16", "ON");
+    config.define("GGML_CUDA_FP16", "ON");
 
     #[cfg(feature = "native")]
-    config.define("LLAMA_NATIVE", "ON");
+    config.define("GGML_NATIVE", "ON");
 
     // Build
     let dst = config.very_verbose(true).build();
 
-    // Link
+    // Link search paths - cmake install puts libs in lib/
+    println!("cargo:rustc-link-search=native={}/lib", dst.display());
+    // Some cmake configs put libs in build/ directly
     println!("cargo:rustc-link-search=native={}/build", dst.display());
-    println!("cargo:rustc-link-lib=static=llama");
+    println!(
+        "cargo:rustc-link-search=native={}/build/src",
+        dst.display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}/build/ggml/src",
+        dst.display()
+    );
 
-    // FIXME: These are fragile because they rely on certain default
-    // configurations and guesses at whatever CMake decides to do.
-    // Can we parse CMake's output? Ugly but it could work.
-    // Actually it's not really that ugly. The CMakeCache.txt has
-    // everything we need to know and it's an ini-like file.
+    // Link llama and ggml libraries (order matters - dependents first)
+    println!("cargo:rustc-link-lib=static=llama");
+    println!("cargo:rustc-link-lib=static=ggml");
+    println!("cargo:rustc-link-lib=static=ggml-base");
+    println!("cargo:rustc-link-lib=static=ggml-cpu");
+
+    // C++ standard library
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-lib=dylib=c++");
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-lib=dylib=stdc++");
-    #[cfg(target_os = "windows")]
-    // Thanks, ChatGPT 4o for the name of the msvc c++ runtime and this fix:
     #[cfg(all(target_os = "windows", debug_assertions))]
-    println!("cargo:rustc-link-lib=dylib=msvcrtd"); // Use debug runtime
+    println!("cargo:rustc-link-lib=dylib=msvcrtd");
     #[cfg(all(target_os = "windows", not(debug_assertions)))]
-    println!("cargo:rustc-link-lib=dylib=msvcrt"); // Use release runtime
+    println!("cargo:rustc-link-lib=dylib=msvcrt");
 
+    // macOS frameworks
     #[cfg(target_os = "macos")]
     {
+        println!("cargo:rustc-link-lib=static=ggml-metal");
+        println!("cargo:rustc-link-lib=static=ggml-blas");
         println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=Metal");
@@ -63,28 +76,35 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=MetalPerformanceShaders");
     }
 
+    // CUDA libraries
     #[cfg(feature = "cuda")]
     {
-        // FIXME: Cublas isn't necessarily used by llama.cpp, but it is used if
-        // it is found. It might be better to make this a feature flag and
-        // manually set the associated cmake flags.
+        println!("cargo:rustc-link-lib=static=ggml-cuda");
         println!("cargo:rustc-link-lib=dylib=cublas");
         println!("cargo:rustc-link-lib=dylib=cudart");
         println!("cargo:rustc-link-lib=dylib=cuda");
     }
 
-    println!("cargo:rerun-if-changed=external/llama.cpp/*.h");
-    println!("cargo:rerun-if-changed=external/llama.cpp/*.c");
-    println!("cargo:rerun-if-changed=external/llama.cpp/*.cpp");
+    // Rerun triggers
+    println!("cargo:rerun-if-changed=external/llama.cpp/include/llama.h");
+    println!("cargo:rerun-if-changed=external/llama.cpp/ggml/include/ggml.h");
 
+    // Generate bindings
     let bindings = bindgen::Builder::default()
-        .header("external/llama.cpp/llama.h")
+        .header("external/llama.cpp/include/llama.h")
+        .clang_arg("-Iexternal/llama.cpp/ggml/include")
         .allowlist_function("llama_.*")
         .allowlist_type("llama_.*")
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+        .allowlist_function("ggml_.*")
+        .allowlist_type("ggml_.*")
+        .allowlist_function("gguf_.*")
+        .allowlist_type("gguf_.*")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings.write_to_file(out_path.join("bindings.rs")).expect("Couldn't write bindings!");
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
+        .expect("Couldn't write bindings!");
 }

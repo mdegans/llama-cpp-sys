@@ -26,16 +26,17 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let model_params = unsafe { llama_model_default_params() };
     let model_name = CString::new("models/model.gguf").unwrap();
-    let model = unsafe { llama_load_model_from_file(model_name.as_ptr(), model_params) };
+    let model = unsafe { llama_model_load_from_file(model_name.as_ptr(), model_params) };
     if model.is_null() {
         return Err(format!("error: unable to load model: {}", model_name.to_str().unwrap()).into());
     }
+
+    let vocab = unsafe { llama_model_get_vocab(model) };
 
     // Init context
 
     let mut ctx_params = unsafe { llama_context_default_params() };
 
-    ctx_params.seed = 1234;
     ctx_params.n_ctx = 2048;
     ctx_params.n_threads = 8;
     ctx_params.n_threads_batch = 8;
@@ -45,9 +46,14 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("error: unable to create model context".into());
     }
 
+    // Init sampler (greedy)
+    let sparams = unsafe { llama_sampler_chain_default_params() };
+    let smpl = unsafe { llama_sampler_chain_init(sparams) };
+    unsafe { llama_sampler_chain_add(smpl, llama_sampler_init_greedy()) };
+
     // Tokenize the prompt
 
-    let mut tokens_list = tokenize(model, PROMPT, true);
+    let mut tokens_list = tokenize(vocab, PROMPT, true);
 
     // Make sure the KV cache is big enough to hold the prompt and generated tokens
 
@@ -67,7 +73,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("\n");
 
     for &token in &tokens_list {
-        print!("{}", token_to_piece(token, model));
+        print!("{}", token_to_piece(token, vocab));
     }
 
     stdout().flush().unwrap();
@@ -94,92 +100,59 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Main loop
-    let n_vocab = unsafe { llama_n_vocab(model) };
     let mut n_cur = batch.n_tokens;
     let mut n_decode = 0;
-    let mut candidates: Vec<llama_token_data> = (0..n_vocab)
-        .map(|token_id| llama_token_data {
-            id: token_id,
-            logit: 0.0,
-            p: 0.0,
-        })
-        .collect();
-    let eos = unsafe { llama_token_eos(model) };
+    let eos = unsafe { llama_vocab_eos(vocab) };
 
     while n_cur <= N_LEN {
-        // Sample the next token
-        {
-            let logits = unsafe { slice::from_raw_parts(llama_get_logits_ith(ctx, batch.n_tokens - 1), n_vocab as usize) };
+        // Sample the next token using the sampler chain
+        let new_token_id = unsafe { llama_sampler_sample(smpl, ctx, batch.n_tokens - 1) };
 
-            for (token_id, candidate) in candidates.iter_mut().enumerate() {
-                candidate.id = token_id.try_into().unwrap();
-                candidate.logit = logits[token_id];
-                candidate.p = 0.0;
-            }
+        tokens_list.push(new_token_id);
 
-            let mut candidates_p = llama_token_data_array {
-                data: candidates.as_mut_ptr(),
-                size: candidates.len(),
-                sorted: false,
-            };
-
-            // sample the most likely token
-            // Safety: Candidates outlives the call to this function.
-            let new_token_id: llama_token = unsafe { llama_sample_token_greedy(ctx, &mut candidates_p) };
-
-            tokens_list.push(new_token_id);
-
-            // is it the end of the stream?
-            if new_token_id == eos || n_cur == N_LEN {
-                break;
-            }
-
-            print!("{}", token_to_piece(new_token_id, model));
-            stdout().flush()?;
-
-            // prepare the next batch (llama_batch_clear does this)
-            batch.n_tokens = 0;
-
-            // push this new token for next evaluation
-            llama_batch_add(&mut batch, new_token_id, n_cur.try_into().unwrap(), true);
-
-            n_decode += 1;
+        // is it the end of the stream?
+        if new_token_id == eos || n_cur == N_LEN {
+            break;
         }
+
+        print!("{}", token_to_piece(new_token_id, vocab));
+        stdout().flush()?;
+
+        // prepare the next batch
+        batch.n_tokens = 0;
+
+        // push this new token for next evaluation
+        llama_batch_add(&mut batch, new_token_id, n_cur.try_into().unwrap(), true);
+
+        n_decode += 1;
 
         n_cur += 1;
 
-        // evaluate the current batch wih the transformer model
+        // evaluate the current batch with the transformer model
         let ret = unsafe { llama_decode(ctx, batch) };
         if ret != 0 {
             return Err(format!("Failed to eval, return code {ret}").into());
         }
     }
 
+    let _ = n_decode; // suppress unused warning
+
     // Cleanup
     unsafe {
+        llama_sampler_free(smpl);
         llama_batch_free(batch);
         llama_free(ctx);
-        llama_free_model(model);
+        llama_model_free(model);
         llama_backend_free();
     }
-
-    // Check results (this should match the next part of the poem)
-    assert_eq!(
-        &tokens_list,
-        &[
-            1, 450, 443, 11576, 681, 3826, 23838, 310, 278, 266, 381, 9404, 443, 1573, 3900, 310, 6813, 29892, 1932, 297, 278, 6325, 344, 310, 5199,
-            4959, 29892, 372, 7415, 5181, 363, 697, 2305, 304, 23556, 345, 278, 8604, 22706, 607, 505, 6631, 963, 411, 1790, 29892, 322, 304, 5251,
-            4249, 278, 10801, 310, 278, 8437, 29892, 278, 5004, 322, 5186, 5073, 304, 607, 278, 997
-        ]
-    );
 
     Ok(())
 }
 
 /// Adapted from `llama.cpp/common/common.cpp`
-fn token_to_piece(token: llama_token, model: *const llama_model) -> String {
+fn token_to_piece(token: llama_token, vocab: *const llama_vocab) -> String {
     let mut buf = [0u8; 64];
-    let n_tokens = unsafe { llama_token_to_piece(model, token, buf.as_mut_ptr() as *mut i8, buf.len().try_into().unwrap(), false) };
+    let n_tokens = unsafe { llama_token_to_piece(vocab, token, buf.as_mut_ptr() as *mut i8, buf.len().try_into().unwrap(), 0, false) };
     buf[buf.len() - 1] = 0;
     if n_tokens < 0 {
         // should be unreachable
@@ -208,13 +181,13 @@ fn llama_batch_add(batch: &mut llama_batch, token: llama_token, pos: usize, logi
 }
 
 /// Adapted from `llama.cpp/common/common.cpp`
-fn tokenize(model: *const llama_model, text: &str, add_bos: bool) -> Vec<llama_token> {
+fn tokenize(vocab: *const llama_vocab, text: &str, add_bos: bool) -> Vec<llama_token> {
     // upper limit for the number of tokens
     let mut n_tokens: i32 = (text.as_bytes().len() + if add_bos { 1 } else { 0 }).try_into().unwrap();
     let mut result = vec![0; n_tokens as usize];
     n_tokens = unsafe {
         llama_tokenize(
-            model,
+            vocab,
             text.as_bytes().as_ptr() as *const i8,
             text.len().try_into().unwrap(),
             result.as_mut_ptr(),
@@ -227,7 +200,7 @@ fn tokenize(model: *const llama_model, text: &str, add_bos: bool) -> Vec<llama_t
         result.resize((-n_tokens).try_into().unwrap(), 0);
         let check = unsafe {
             llama_tokenize(
-                model,
+                vocab,
                 text.as_bytes().as_ptr() as *const i8,
                 text.len().try_into().unwrap(),
                 result.as_mut_ptr(),

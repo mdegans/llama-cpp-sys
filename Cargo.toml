@@ -1,6 +1,6 @@
 [package]
 name = "llama-cpp-sys-3"
-version = "0.5.10"
+version = "0.6.0"
 edition = "2021"
 description = "llama.cpp bindings"
 license = "MIT"
@@ -12,7 +12,7 @@ exclude = ["external/llama.cpp/.git", "external/llama.cpp/models/*"]
 
 [build-dependencies]
 cmake = "0.1"
-bindgen = "0.64.0"
+bindgen = "0.72"
 
 [dev-dependencies]
 rand = "0.8.5"
