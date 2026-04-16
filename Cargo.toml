@@ -4,7 +4,24 @@ version = "0.6.0"
 edition = "2021"
 description = "llama.cpp bindings"
 license = "MIT"
-exclude = ["external/llama.cpp/.git", "external/llama.cpp/models/*"]
+include = [
+    "src/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    # llama.cpp build system
+    "external/llama.cpp/CMakeLists.txt",
+    "external/llama.cpp/cmake/**/*",
+    # llama library source
+    "external/llama.cpp/src/**/*",
+    "external/llama.cpp/include/**/*",
+    # ggml library source and build
+    "external/llama.cpp/ggml/**/*",
+    # installed by cmake
+    "external/llama.cpp/convert_hf_to_gguf.py",
+    "tests/**/*",
+]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
