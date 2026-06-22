@@ -35,6 +35,34 @@ fn main() {
     #[cfg(feature = "native")]
     config.define("GGML_NATIVE", "ON");
 
+    // Decide how to handle OpenMP on Linux. ggml-cpu links an OpenMP runtime
+    // (libgomp for GCC, libomp for Clang), and because we link the static
+    // archives directly we have to locate and link that runtime ourselves.
+    // Keep this in lockstep with the cmake build: if we can find a runtime we
+    // enable OpenMP and link it; if we can't, we disable OpenMP (matching
+    // upstream's graceful fallback) and warn, rather than fail the link.
+    #[cfg(target_os = "linux")]
+    let linux_openmp = {
+        println!("cargo:rerun-if-env-changed=LLAMA_CPP_SYS_OMP_PATH");
+        println!("cargo:rerun-if-env-changed=CC");
+        let runtime = linux_openmp_runtime();
+        match &runtime {
+            Some((lib, _)) => {
+                config.define("GGML_OPENMP", "ON");
+                eprintln!("llama-cpp-sys: building with OpenMP (lib{lib})");
+            }
+            None => {
+                config.define("GGML_OPENMP", "OFF");
+                println!(
+                    "cargo:warning=OpenMP runtime not found; building ggml without OpenMP. \
+                     Set LLAMA_CPP_SYS_OMP_PATH to the directory containing the runtime \
+                     (libomp.so/libgomp.so) to enable it."
+                );
+            }
+        }
+        runtime
+    };
+
     // Build
     let dst = config.very_verbose(true).build();
 
@@ -63,10 +91,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rustc-link-lib=dylib=stdc++");
-        // ggml-cpu is built with OpenMP enabled; since we link the static
-        // archives directly, the GNU OpenMP runtime (libgomp) must be linked
-        // explicitly to resolve the GOMP_*/omp_* symbols it references.
-        println!("cargo:rustc-link-lib=dylib=gomp");
+        if let Some((lib, search_dir)) = linux_openmp {
+            if let Some(dir) = search_dir {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+            }
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
     }
     #[cfg(all(target_os = "windows", debug_assertions))]
     println!("cargo:rustc-link-lib=dylib=msvcrtd");
@@ -116,4 +146,53 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+/// Resolve the OpenMP runtime to link on Linux.
+///
+/// Returns `Some((link_name, search_dir))` where `link_name` is the library to
+/// pass to `-l` and `search_dir` an optional directory to add to the linker
+/// search path, or `None` if no runtime could be located (OpenMP is disabled).
+///
+/// A directory given via `LLAMA_CPP_SYS_OMP_PATH` always takes precedence; if
+/// it doesn't contain the expected runtime we fall back to disabling OpenMP
+/// rather than silently auto-detecting something else.
+#[cfg(target_os = "linux")]
+fn linux_openmp_runtime() -> Option<(&'static str, Option<PathBuf>)> {
+    let override_dir = env::var_os("LLAMA_CPP_SYS_OMP_PATH").map(PathBuf::from);
+    let compiler = cc::Build::new().get_compiler();
+
+    if compiler.is_like_clang() {
+        // Clang uses libomp, whose unversioned `.so` lives in clang's private
+        // lib dir (e.g. /usr/lib/llvm-NN/lib) - not on the default linker path
+        // and not reported by `-print-file-name`/`-print-search-dirs` - so we
+        // have to locate it and add it to the search path explicitly.
+        let dir = override_dir.or_else(|| clang_openmp_dir(&compiler));
+        match dir {
+            Some(d) if d.join("libomp.so").exists() => Some(("omp", Some(d))),
+            _ => None,
+        }
+    } else {
+        // GCC uses libgomp, which ships on the standard toolchain search path
+        // (the same path that already resolves libstdc++), so no extra search
+        // dir is required beyond an optional override.
+        Some(("gomp", override_dir))
+    }
+}
+
+/// Derive the directory containing Clang's `libomp.so` from its resource dir.
+///
+/// `clang -print-resource-dir` yields `<llvm>/lib/clang/<ver>`, and the runtime
+/// lives at `<llvm>/lib`, i.e. two levels up.
+#[cfg(target_os = "linux")]
+fn clang_openmp_dir(compiler: &cc::Tool) -> Option<PathBuf> {
+    let out = std::process::Command::new(compiler.path())
+        .arg("-print-resource-dir")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let resource_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    Some(resource_dir.parent()?.parent()?.to_path_buf())
 }
