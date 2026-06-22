@@ -1,0 +1,77 @@
+name: Release
+
+# On every merge/push to main: publish the crate to crates.io (if the version
+# isn't already published) and tag + release it. The PR CI guarantees the
+# version was bumped, so each merge to main corresponds to a new release.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # needed to push the tag and create the GitHub Release
+
+# Never cancel a release mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # need full history/tags to check for an existing tag
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: lukka/get-cmake@latest
+
+      - name: Read crate version
+        id: ver
+        shell: bash
+        run: |
+          VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $VER"
+
+      - name: Check if version is already on crates.io
+        id: published
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          # crates.io sparse index path for a name >= 4 chars: /<a b>/<c d>/<name>
+          if curl -fsSL "https://index.crates.io/ll/am/llama-cpp-sys-3" | grep -q "\"vers\":\"${VER}\""; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version ${VER} already published; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.published.outputs.exists == 'false'
+        run: cargo publish
+
+      - name: Check if tag already exists
+        id: tag
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.ver.outputs.tag }} already exists; skipping tag/release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true

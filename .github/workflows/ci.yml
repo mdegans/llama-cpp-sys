@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap gate: a PR into main must bump the crate version above main's.
+  version-check:
+    name: version bumped
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Cargo.toml version is bumped above main
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver() { grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; }
+          PR_VER=$(ver < Cargo.toml)
+          git fetch --depth=1 origin main
+          BASE_VER=$(git show origin/main:Cargo.toml | ver)
+          echo "main = ${BASE_VER}, PR = ${PR_VER}"
+          if [ "$PR_VER" = "$BASE_VER" ]; then
+            echo "::error::Cargo.toml version ($PR_VER) must be bumped above main ($BASE_VER)."
+            exit 1
+          fi
+          HIGHER=$(printf '%s\n%s\n' "$BASE_VER" "$PR_VER" | sort -V | tail -1)
+          if [ "$HIGHER" != "$PR_VER" ]; then
+            echo "::error::Cargo.toml version ($PR_VER) is not greater than main ($BASE_VER)."
+            exit 1
+          fi
+          echo "Version OK: ${BASE_VER} -> ${PR_VER}"
+
+  # Build the static libs from the submodule, link, and run a tiny smoke test
+  # on each OS. This proves the build/link/bindgen pipeline works and that
+  # generation isn't completely broken (coherence is covered downstream).
+  build-test:
+    name: build & test (${{ matrix.os }})
+    needs: [version-check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      LLAMA_TEST_MODEL: models/model.gguf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Provides a recent CMake + Ninja on all three platforms.
+      - uses: lukka/get-cmake@latest
+      # Put cl.exe on PATH so the Ninja generator can find the MSVC compiler.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      # bindgen needs libclang; it ships with the preinstalled LLVM on the image.
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Download tiny test model
+        shell: bash
+        run: |
+          mkdir -p models
+          curl -fL --retry 3 --retry-delay 2 -o models/model.gguf \
+            https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+      # Compile every target, including the heavier tests/test_generate.rs
+      # integration test, so a broken build surfaces even though we don't run it.
+      - name: Compile all targets
+        run: cargo test --no-run
+      # Run the no-model lib test and the 3-token generation smoke test.
+      - name: Run tests
+        run: cargo test --lib --test smoke_generate -- --nocapture
+
+  # Verify the crate still packages and builds from the packaged tarball, so a
+  # publishing failure is caught on the PR rather than after merge into main.
+  package:
+    name: package (dry-run)
+    needs: [version-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: lukka/get-cmake@latest
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
