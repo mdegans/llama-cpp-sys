@@ -131,12 +131,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "NVCC_PREPEND_FLAGS=-allow-unsupported-compiler" >> "$GITHUB_ENV"
+      # Full toolkit install: the per-OS network sub-package names diverge
+      # (cuBLAS isn't cuda-prefixed on Linux apt; the Windows component set
+      # omitted crt/host_config.h), so install everything to guarantee nvcc,
+      # the core headers, cuBLAS dev libs, and the libcuda driver stub are all
+      # present. Slower and uncached, but deterministic.
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '13.2.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas"]'
+          method: 'local'
       - name: nvcc version
         run: nvcc --version
       - name: Build & link with --features cuda (compile-only, no GPU)
