@@ -27,6 +27,21 @@ $ cargo build --features="cuda_f16"
 
 which implies the `cuda` feature.
 
+### OpenMP
+
+On Linux, `ggml` is built with OpenMP and the build links the matching runtime
+automatically: `libgomp` for GCC and `libomp` for Clang. Clang's `libomp` lives
+in its private lib directory, which the build discovers via the compiler's
+resource dir. If detection fails (or you want to point at a specific runtime),
+set `LLAMA_CPP_SYS_OMP_PATH` to the directory containing `libomp.so`/`libgomp.so`:
+
+```bash
+$ LLAMA_CPP_SYS_OMP_PATH=/usr/lib/llvm-18/lib cargo build
+```
+
+If no runtime can be found, the build emits a warning and falls back to building
+`ggml` without OpenMP (it then uses its own pthread threadpool).
+
 ## Run example
 
 Put your models in the `models` folder; the test expects a file in the path:
