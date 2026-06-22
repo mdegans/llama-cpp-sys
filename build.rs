@@ -13,7 +13,10 @@ fn main() {
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
-        .define("LLAMA_BUILD_TOOLS", "OFF");
+        .define("LLAMA_BUILD_TOOLS", "OFF")
+        // Upstream added a unified `app` binary that is not gated behind
+        // LLAMA_BUILD_COMMON; disable it so we only build the libraries.
+        .define("LLAMA_BUILD_APP", "OFF");
 
     #[cfg(target_os = "macos")]
     {
@@ -58,7 +61,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-lib=dylib=c++");
     #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-lib=dylib=stdc++");
+    {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+        // ggml-cpu is built with OpenMP enabled; since we link the static
+        // archives directly, the GNU OpenMP runtime (libgomp) must be linked
+        // explicitly to resolve the GOMP_*/omp_* symbols it references.
+        println!("cargo:rustc-link-lib=dylib=gomp");
+    }
     #[cfg(all(target_os = "windows", debug_assertions))]
     println!("cargo:rustc-link-lib=dylib=msvcrtd");
     #[cfg(all(target_os = "windows", not(debug_assertions)))]
