@@ -154,30 +154,63 @@ fn main() {
 /// pass to `-l` and `search_dir` an optional directory to add to the linker
 /// search path, or `None` if no runtime could be located (OpenMP is disabled).
 ///
-/// A directory given via `LLAMA_CPP_SYS_OMP_PATH` always takes precedence; if
-/// it doesn't contain the expected runtime we fall back to disabling OpenMP
-/// rather than silently auto-detecting something else.
+/// In every case we verify that the runtime `.so` actually exists before
+/// committing to link it; if it can't be found we return `None` so the caller
+/// warns and falls back to ggml's own threadpool rather than failing the link.
+/// A directory given via `LLAMA_CPP_SYS_OMP_PATH` takes precedence, but is
+/// still checked - a wrong override disables OpenMP rather than auto-detecting
+/// something else.
 #[cfg(target_os = "linux")]
 fn linux_openmp_runtime() -> Option<(&'static str, Option<PathBuf>)> {
-    let override_dir = env::var_os("LLAMA_CPP_SYS_OMP_PATH").map(PathBuf::from);
     let compiler = cc::Build::new().get_compiler();
-
-    if compiler.is_like_clang() {
-        // Clang uses libomp, whose unversioned `.so` lives in clang's private
-        // lib dir (e.g. /usr/lib/llvm-NN/lib) - not on the default linker path
-        // and not reported by `-print-file-name`/`-print-search-dirs` - so we
-        // have to locate it and add it to the search path explicitly.
-        let dir = override_dir.or_else(|| clang_openmp_dir(&compiler));
-        match dir {
-            Some(d) if d.join("libomp.so").exists() => Some(("omp", Some(d))),
-            _ => None,
-        }
+    // GCC links libgomp, Clang/LLVM links libomp.
+    let (lib, soname) = if compiler.is_like_clang() {
+        ("omp", "libomp.so")
     } else {
-        // GCC uses libgomp, which ships on the standard toolchain search path
-        // (the same path that already resolves libstdc++), so no extra search
-        // dir is required beyond an optional override.
-        Some(("gomp", override_dir))
+        ("gomp", "libgomp.so")
+    };
+
+    // 1. Explicit override wins, but must actually contain the runtime.
+    if let Some(dir) = env::var_os("LLAMA_CPP_SYS_OMP_PATH").map(PathBuf::from) {
+        return dir.join(soname).exists().then_some((lib, Some(dir)));
     }
+
+    // 2. Ask the compiler where the runtime is. GCC resolves libgomp to an
+    //    absolute path this way; Clang cannot locate libomp like this, so it
+    //    falls through to the resource-dir derivation below.
+    if let Some(path) = compiler_lib_path(&compiler, soname) {
+        return Some((lib, path.parent().map(|p| p.to_path_buf())));
+    }
+
+    // 3. Clang fallback: libomp lives in clang's private lib dir (e.g.
+    //    /usr/lib/llvm-NN/lib), which is not on the default linker path.
+    if compiler.is_like_clang() {
+        if let Some(dir) = clang_openmp_dir(&compiler) {
+            if dir.join(soname).exists() {
+                return Some((lib, Some(dir)));
+            }
+        }
+    }
+
+    // 4. Nothing found - caller disables OpenMP and warns.
+    None
+}
+
+/// Ask the compiler for the absolute path of a library via `-print-file-name`.
+///
+/// Returns `Some(path)` only when the compiler resolves it to a real, absolute
+/// file; a bare soname (the "not found" response) yields `None`.
+#[cfg(target_os = "linux")]
+fn compiler_lib_path(compiler: &cc::Tool, soname: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new(compiler.path())
+        .arg(format!("-print-file-name={soname}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (path.is_absolute() && path.exists()).then_some(path)
 }
 
 /// Derive the directory containing Clang's `libomp.so` from its resource dir.
