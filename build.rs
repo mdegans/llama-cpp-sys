@@ -102,6 +102,12 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=msvcrtd");
     #[cfg(all(target_os = "windows", not(debug_assertions)))]
     println!("cargo:rustc-link-lib=dylib=msvcrt");
+    // ggml-cpu reads the registry (HKLM\...\CentralProcessor) to get the CPU
+    // name on Windows, pulling in the Reg* APIs from advapi32. CMake links this
+    // automatically for its own targets, but since we consume the static
+    // archive directly we have to link the system lib ourselves.
+    #[cfg(target_os = "windows")]
+    println!("cargo:rustc-link-lib=dylib=advapi32");
 
     // macOS frameworks
     #[cfg(target_os = "macos")]
