@@ -95,3 +95,49 @@ jobs:
       - uses: lukka/get-cmake@latest
       - name: cargo publish --dry-run
         run: cargo publish --dry-run
+
+  # Build + link with the CUDA backend on Linux and Windows. The hosted runners
+  # have no GPU, so this is a compile/link-only check (cargo test --no-run): it
+  # proves --features cuda builds and links against the toolkit (the driver API
+  # via the libcuda stub), not that kernels actually execute.
+  cuda-build:
+    name: cuda build & link (${{ matrix.os }})
+    needs: [version-check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Limit nvcc to a single GPU arch to keep the build fast -- we never run
+      # kernels, we only need them to compile and link.
+      CUDAARCHS: "75"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: lukka/get-cmake@latest
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      # Tolerate nvcc running against a newer host MSVC than it officially lists.
+      - name: Allow unsupported host compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "NVCC_PREPEND_FLAGS=-allow-unsupported-compiler" >> "$GITHUB_ENV"
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas"]'
+      - name: nvcc version
+        run: nvcc --version
+      - name: Build & link with --features cuda (compile-only, no GPU)
+        run: cargo test --no-run --features cuda

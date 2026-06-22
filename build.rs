@@ -124,6 +124,36 @@ fn main() {
     // CUDA libraries
     #[cfg(feature = "cuda")]
     {
+        // cublas/cudart and the CUDA driver API live in the toolkit, which is
+        // not on the linker's default search path. Derive the lib dirs from
+        // CUDA_PATH (set by standard installs and CI toolkit actions), falling
+        // back to CUDA_HOME and the conventional install location.
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+        println!("cargo:rerun-if-env-changed=CUDA_HOME");
+        let cuda_root = PathBuf::from(
+            env::var("CUDA_PATH")
+                .or_else(|_| env::var("CUDA_HOME"))
+                .unwrap_or_else(|_| "/usr/local/cuda".to_string()),
+        );
+
+        #[cfg(target_os = "windows")]
+        println!("cargo:rustc-link-search=native={}", cuda_root.join("lib").join("x64").display());
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Cover both the lib64 layout and the targets/ layout used by some
+            // distributions. The stubs dir provides the link-time libcuda so a
+            // real GPU driver isn't required to build.
+            for lib in [
+                cuda_root.join("lib64"),
+                cuda_root.join("lib64").join("stubs"),
+                cuda_root.join("targets").join("x86_64-linux").join("lib"),
+                cuda_root.join("targets").join("x86_64-linux").join("lib").join("stubs"),
+            ] {
+                println!("cargo:rustc-link-search=native={}", lib.display());
+            }
+        }
+
         println!("cargo:rustc-link-lib=static=ggml-cuda");
         println!("cargo:rustc-link-lib=dylib=cublas");
         println!("cargo:rustc-link-lib=dylib=cudart");
