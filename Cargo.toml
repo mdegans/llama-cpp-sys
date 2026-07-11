@@ -1,6 +1,6 @@
 [package]
 name = "llama-cpp-sys-3"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "llama.cpp bindings"
 license = "MIT"
@@ -21,6 +21,36 @@ include = [
     # installed by cmake
     "external/llama.cpp/convert_hf_to_gguf.py",
     "tests/**/*",
+    # `mtmd` feature. Configuring with LLAMA_BUILD_TOOLS=ON runs
+    # add_subdirectory() for every non-server tool and cmake verifies each
+    # target's listed sources exist at generate time, so the sibling tool
+    # sources must ship even though only the `mtmd` library target is built.
+    # (ui/cli/server are gated on LLAMA_BUILD_SERVER and rpc on GGML_RPC,
+    # both OFF here.)
+    "external/llama.cpp/common/**/*",
+    "external/llama.cpp/vendor/**/*",
+    "external/llama.cpp/tools/CMakeLists.txt",
+    "external/llama.cpp/tools/batched-bench/**/*",
+    "external/llama.cpp/tools/completion/**/*",
+    "external/llama.cpp/tools/cvector-generator/**/*",
+    "external/llama.cpp/tools/export-lora/**/*",
+    "external/llama.cpp/tools/fit-params/**/*",
+    "external/llama.cpp/tools/gguf-split/**/*",
+    "external/llama.cpp/tools/imatrix/**/*",
+    "external/llama.cpp/tools/llama-bench/**/*",
+    "external/llama.cpp/tools/parser/**/*",
+    "external/llama.cpp/tools/perplexity/**/*",
+    "external/llama.cpp/tools/quantize/**/*",
+    "external/llama.cpp/tools/results/**/*",
+    "external/llama.cpp/tools/tokenize/**/*",
+    "external/llama.cpp/tools/tts/**/*",
+    # mtmd itself, selectively: skip test media (crates.io 10MB cap) and the
+    # legacy python conversion scripts.
+    "external/llama.cpp/tools/mtmd/CMakeLists.txt",
+    "external/llama.cpp/tools/mtmd/*.cpp",
+    "external/llama.cpp/tools/mtmd/*.h",
+    "external/llama.cpp/tools/mtmd/models/**/*",
+    "external/llama.cpp/tools/mtmd/debug/**/*",
 ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -38,5 +68,8 @@ rand = "0.8.5"
 [features]
 cuda = []
 cuda_f16 = ["cuda"]
+# Multimodal (libmtmd): builds upstream tools/mtmd as a library and binds
+# mtmd.h + mtmd-helper.h. Adds no tool executables.
+mtmd = []
 native = []
 # TODO(mdegans): vulkan, kompute, clblast, mpi, CUDA on Windows, etc.

@@ -27,6 +27,19 @@ $ cargo build --features="cuda_f16"
 
 which implies the `cuda` feature.
 
+### Multimodal (mtmd)
+
+Bindings for llama.cpp's multimodal library (`libmtmd`: `mtmd.h` +
+`mtmd-helper.h`) are behind the `mtmd` feature:
+
+```bash
+$ cargo build --features="mtmd"
+```
+
+This builds only the `mtmd` library target (no tool executables) with video
+support disabled. Using it requires a multimodal projector (`mmproj`) GGUF
+alongside the text model.
+
 ### OpenMP
 
 On Linux, `ggml` is built with OpenMP and the build links the matching runtime

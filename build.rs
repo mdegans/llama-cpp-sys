@@ -3,38 +3,6 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Configure
-    let mut config = Config::new("external/llama.cpp");
-    config
-        .build_target("install")
-        .generator("Ninja")
-        .define("BUILD_SHARED_LIBS", "OFF")
-        .define("LLAMA_BUILD_COMMON", "OFF")
-        .define("LLAMA_BUILD_EXAMPLES", "OFF")
-        .define("LLAMA_BUILD_SERVER", "OFF")
-        .define("LLAMA_BUILD_TESTS", "OFF")
-        .define("LLAMA_BUILD_TOOLS", "OFF")
-        // Upstream added a unified `app` binary that is not gated behind
-        // LLAMA_BUILD_COMMON; disable it so we only build the libraries.
-        .define("LLAMA_BUILD_APP", "OFF");
-
-    #[cfg(target_os = "macos")]
-    {
-        config
-            .define("GGML_METAL", "ON")
-            .define("GGML_ACCELERATE", "ON")
-            .define("GGML_METAL_EMBED_LIBRARY", "ON");
-    }
-
-    #[cfg(feature = "cuda")]
-    config.define("GGML_CUDA", "ON");
-
-    #[cfg(feature = "cuda_f16")]
-    config.define("GGML_CUDA_FP16", "ON");
-
-    #[cfg(feature = "native")]
-    config.define("GGML_NATIVE", "ON");
-
     // Decide how to handle OpenMP on Linux. ggml-cpu links an OpenMP runtime
     // (libgomp for GCC, libomp for Clang), and because we link the static
     // archives directly we have to locate and link that runtime ourselves.
@@ -48,11 +16,9 @@ fn main() {
         let runtime = linux_openmp_runtime();
         match &runtime {
             Some((lib, _)) => {
-                config.define("GGML_OPENMP", "ON");
                 eprintln!("llama-cpp-sys: building with OpenMP (lib{lib})");
             }
             None => {
-                config.define("GGML_OPENMP", "OFF");
                 println!(
                     "cargo:warning=OpenMP runtime not found; building ggml without OpenMP. \
                      Set LLAMA_CPP_SYS_OMP_PATH to the directory containing the runtime \
@@ -63,8 +29,71 @@ fn main() {
         runtime
     };
 
-    // Build
+    // Everything both cmake passes agree on. The passes share one build tree,
+    // so any define left out here would flip-flop the cmake cache between
+    // reconfigures.
+    let base_config = || {
+        let mut config = Config::new("external/llama.cpp");
+        config
+            .generator("Ninja")
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .define("LLAMA_BUILD_EXAMPLES", "OFF")
+            .define("LLAMA_BUILD_SERVER", "OFF")
+            .define("LLAMA_BUILD_TESTS", "OFF")
+            // Upstream added a unified `app` binary that is not gated behind
+            // LLAMA_BUILD_COMMON; disable it so we only build the libraries.
+            .define("LLAMA_BUILD_APP", "OFF");
+
+        #[cfg(target_os = "macos")]
+        {
+            config
+                .define("GGML_METAL", "ON")
+                .define("GGML_ACCELERATE", "ON")
+                .define("GGML_METAL_EMBED_LIBRARY", "ON");
+        }
+
+        #[cfg(feature = "cuda")]
+        config.define("GGML_CUDA", "ON");
+
+        #[cfg(feature = "cuda_f16")]
+        config.define("GGML_CUDA_FP16", "ON");
+
+        #[cfg(feature = "native")]
+        config.define("GGML_NATIVE", "ON");
+
+        #[cfg(target_os = "linux")]
+        config.define(
+            "GGML_OPENMP",
+            if linux_openmp.is_some() { "ON" } else { "OFF" },
+        );
+
+        config
+    };
+
+    // Build the core libraries via the `install` target. Tools stay OFF here:
+    // `install` depends on `all`, which would otherwise build every tool
+    // executable.
+    let mut config = base_config();
+    config
+        .build_target("install")
+        .define("LLAMA_BUILD_COMMON", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "OFF");
     let dst = config.very_verbose(true).build();
+
+    // mtmd: reconfigure the same build tree with tools enabled, but build
+    // ONLY the `mtmd` library target — it links just ggml+llama (upstream
+    // FATAL_ERRORs if it ever links llama-common), and no tool executables
+    // get built this way.
+    #[cfg(feature = "mtmd")]
+    {
+        let mut config = base_config();
+        config
+            .build_target("mtmd")
+            .define("LLAMA_BUILD_COMMON", "ON")
+            .define("LLAMA_BUILD_TOOLS", "ON")
+            .define("MTMD_VIDEO", "OFF");
+        config.very_verbose(true).build();
+    }
 
     // Link search paths - cmake install puts libs in lib/
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
@@ -80,6 +109,15 @@ fn main() {
     );
 
     // Link llama and ggml libraries (order matters - dependents first)
+    // mtmd is never installed; it stays in the build tree.
+    #[cfg(feature = "mtmd")]
+    {
+        println!(
+            "cargo:rustc-link-search=native={}/build/tools/mtmd",
+            dst.display()
+        );
+        println!("cargo:rustc-link-lib=static=mtmd");
+    }
     println!("cargo:rustc-link-lib=static=llama");
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-base");
@@ -163,9 +201,15 @@ fn main() {
     // Rerun triggers
     println!("cargo:rerun-if-changed=external/llama.cpp/include/llama.h");
     println!("cargo:rerun-if-changed=external/llama.cpp/ggml/include/ggml.h");
+    #[cfg(feature = "mtmd")]
+    {
+        println!("cargo:rerun-if-changed=external/llama.cpp/tools/mtmd/mtmd.h");
+        println!("cargo:rerun-if-changed=external/llama.cpp/tools/mtmd/mtmd-helper.h");
+    }
 
     // Generate bindings
-    let bindings = bindgen::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = bindgen::Builder::default()
         .header("external/llama.cpp/include/llama.h")
         .clang_arg("-Iexternal/llama.cpp/ggml/include")
         .allowlist_function("llama_.*")
@@ -173,7 +217,21 @@ fn main() {
         .allowlist_function("ggml_.*")
         .allowlist_type("ggml_.*")
         .allowlist_function("gguf_.*")
-        .allowlist_type("gguf_.*")
+        .allowlist_type("gguf_.*");
+
+    // The helper functions share the mtmd_ prefix, and we want them: the safe
+    // layer differential-tests its own eval loop against them.
+    #[cfg(feature = "mtmd")]
+    {
+        builder = builder
+            .header("external/llama.cpp/tools/mtmd/mtmd.h")
+            .header("external/llama.cpp/tools/mtmd/mtmd-helper.h")
+            .clang_arg("-Iexternal/llama.cpp/include")
+            .allowlist_function("mtmd_.*")
+            .allowlist_type("mtmd_.*");
+    }
+
+    let bindings = builder
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");

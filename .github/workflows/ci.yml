@@ -79,6 +79,11 @@ jobs:
       # Run the no-model lib test and the 3-token generation smoke test.
       - name: Run tests
         run: cargo test --lib --test smoke_generate -- --nocapture
+      # Same, plus the mtmd link smoke test. Separate invocation: the feature
+      # changes the cmake configuration, so this proves both feature states
+      # build and link on every OS.
+      - name: Run tests (mtmd)
+        run: cargo test --features mtmd --lib --test smoke_generate --test mtmd_smoke -- --nocapture
 
   # Verify the crate still packages and builds from the packaged tarball, so a
   # publishing failure is caught on the PR rather than after merge into main.
@@ -95,6 +100,14 @@ jobs:
       - uses: lukka/get-cmake@latest
       - name: cargo publish --dry-run
         run: cargo publish --dry-run
+      # The dry-run verifies default features only; mtmd is the feature with
+      # nontrivial packaging (tools/, common/, vendor/ must all ship), so
+      # build the extracted package with it too.
+      - name: Build packaged crate with mtmd
+        shell: bash
+        run: |
+          cd target/package/llama-cpp-sys-3-*/
+          cargo build --features mtmd
 
   # Build + link with the CUDA backend on Linux and Windows. The hosted runners
   # have no GPU, so this is a compile/link-only check (cargo test --no-run): it
