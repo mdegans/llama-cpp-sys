@@ -1,6 +1,6 @@
 [package]
 name = "llama-cpp-sys-3"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2021"
 description = "llama.cpp bindings"
 license = "MIT"
@@ -44,6 +44,13 @@ include = [
     "external/llama.cpp/tools/results/**/*",
     "external/llama.cpp/tools/tokenize/**/*",
     "external/llama.cpp/tools/tts/**/*",
+    # Added only under GGML_METAL, so Linux CI never configures it and a
+    # missing entry breaks macOS `mtmd` builds alone (0.8.3). Explicit
+    # file shapes rather than `**/*` to keep future additions from
+    # silently growing the package.
+    "external/llama.cpp/tools/tuning/CMakeLists.txt",
+    "external/llama.cpp/tools/tuning/*.cpp",
+    "external/llama.cpp/tools/tuning/*.h",
     # mtmd itself, selectively: skip test media (crates.io 10MB cap) and the
     # legacy python conversion scripts.
     "external/llama.cpp/tools/mtmd/CMakeLists.txt",
